@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hibob-mcp-readonly"
+version = "1.0.0"
+description = "HiBob Read-Only MCP server for airSlate HR team"
+requires-python = ">=3.10"
+dependencies = [
+    "fastmcp",
+    "requests",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-mock",
+    "responses",
+]
+
+[tool.setuptools]
+packages = ["hibob_mcp_readonly"]
+
+[project.scripts]
+hibob-mcp-readonly = "hibob_mcp_readonly.server:main"
