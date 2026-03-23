@@ -1,8 +1,13 @@
 .venv/
 .git/
+.claude/
 .pytest_cache/
 __pycache__/
 *.egg-info/
 tests/
 docs/
 *.pyc
+*.mcpb
+run.sh
+.DS_Store
+.gitignore

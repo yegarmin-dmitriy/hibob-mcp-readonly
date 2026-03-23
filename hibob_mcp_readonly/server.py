@@ -1,9 +1,9 @@
 import os
 import functools
 from fastmcp import FastMCP
-from hibob_mcp_readonly.api_client import HiBobClient, HiBobAPIError
-from hibob_mcp_readonly.field_filter import filter_response
-from hibob_mcp_readonly.constants import ALLOWED_FIELD_PREFIXES, DEFAULT_SEARCH_FIELDS, ERROR_MESSAGES
+from .api_client import HiBobClient, HiBobAPIError
+from .field_filter import filter_response
+from .constants import ALLOWED_FIELD_PREFIXES, DEFAULT_SEARCH_FIELDS, ERROR_MESSAGES
 
 SERVER_INSTRUCTIONS = """You are connected to airSlate's HiBob HRIS system in READ-ONLY mode.
 

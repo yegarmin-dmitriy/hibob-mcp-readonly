@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "hibob-readonly",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "HiBob Read-Only connector for airSlate HR team — query employee data, time off, tasks, and goals via natural language.",
   "author": {
     "name": "airSlate IT",
@@ -11,8 +11,12 @@
     "type": "python",
     "entry_point": "hibob_mcp_readonly/server.py",
     "mcp_config": {
-      "command": "python3",
-      "args": ["-m", "hibob_mcp_readonly.server"],
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory", "${__dirname}",
+        "python", "-m", "hibob_mcp_readonly.server"
+      ],
       "env": {
         "HIBOB_SERVICE_USER_ID": "${user_config.HIBOB_SERVICE_USER_ID}",
         "HIBOB_API_TOKEN": "${user_config.HIBOB_API_TOKEN}"

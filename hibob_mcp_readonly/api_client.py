@@ -1,6 +1,6 @@
 import base64
 import requests
-from hibob_mcp_readonly.constants import (
+from .constants import (
     HIBOB_API_BASE,
     ERROR_MESSAGES,
     REQUEST_TIMEOUT_SECONDS,

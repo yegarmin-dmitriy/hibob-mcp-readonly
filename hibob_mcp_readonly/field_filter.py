@@ -6,7 +6,7 @@ whitelisted fields pass through to Claude. Handles both flat employee
 dicts and search results with employee lists.
 """
 
-from hibob_mcp_readonly.constants import ALLOWED_FIELD_PREFIXES
+from .constants import ALLOWED_FIELD_PREFIXES
 
 
 def _allowed_top_level_keys():
