@@ -11,9 +11,19 @@ HIBOB_API_BASE = "https://api.hibob.com/v1"
 # Whitelist: ONLY these field prefixes pass through to Claude.
 # If HiBob adds a new field category, it is automatically excluded.
 ALLOWED_FIELD_PREFIXES = [
-    "root.displayName",
+    "root.id",
+    "root.fullName",
+    "root.firstName",
+    "root.surname",
     "root.email",
     "root.avatar",
+    # With humanReadable, root. prefix is stripped: root.email -> email, root.fullName -> fullName
+    "id",
+    "fullName",
+    "firstName",
+    "surname",
+    "email",
+    "displayName",
     "work.title",
     "work.department",
     "work.team",
@@ -31,7 +41,10 @@ ALLOWED_FIELD_PREFIXES = [
 # Fields requested in employee search POST body.
 # Constrains what Claude can ask for — even if it requests other fields, they are ignored.
 DEFAULT_SEARCH_FIELDS = [
-    "root.displayName",
+    "root.id",
+    "root.fullName",
+    "root.firstName",
+    "root.surname",
     "root.email",
     "work.title",
     "work.department",

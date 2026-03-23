@@ -92,17 +92,60 @@ def search_employees(filters: list = None, fields: list = None) -> dict:
         fields: Ignored — always uses the safe default field list.
     """
     client = _get_client()
-    body = {"fields": DEFAULT_SEARCH_FIELDS}
+    # HiBob API only supports filters on root.id and root.email.
+    # All other filters (e.g. work.department) are applied client-side.
+    api_filters = []
+    client_filters = []
     if filters:
-        body["filters"] = _validate_filters(filters)
-    return _safe_call(lambda: client.post("people/search", body))
+        validated = _validate_filters(filters)
+        for f in validated:
+            fp = f.get("fieldPath", "")
+            if fp in ("root.id", "root.email"):
+                api_filters.append(f)
+            else:
+                client_filters.append(f)
+
+    body = {"fields": DEFAULT_SEARCH_FIELDS, "humanReadable": "REPLACE"}
+    if api_filters:
+        body["filters"] = api_filters
+
+    result = _safe_call(lambda: client.post("people/search", body))
+    if isinstance(result, dict) and "error" not in result and client_filters:
+        result["employees"] = _apply_client_filters(result.get("employees", []), client_filters)
+    return result
+
+
+def _apply_client_filters(employees: list, filters: list) -> list:
+    """Apply filters client-side for fields HiBob API doesn't support filtering on."""
+    filtered = employees
+    for f in filters:
+        field_path = f.get("fieldPath", "")
+        operator = f.get("operator", "equals")
+        values = [v.lower() for v in f.get("values", [])]
+        parts = field_path.split(".")
+
+        def get_nested(obj, keys):
+            for k in keys:
+                if isinstance(obj, dict):
+                    obj = obj.get(k)
+                else:
+                    return None
+            return obj
+
+        if operator == "equals":
+            filtered = [e for e in filtered if str(get_nested(e, parts) or "").lower() in values]
+        elif operator == "contains":
+            filtered = [e for e in filtered if any(v in str(get_nested(e, parts) or "").lower() for v in values)]
+
+    return filtered
 
 
 @mcp.tool()
 def get_employee(employee_id: str) -> dict:
     """Get details for a specific employee by their HiBob ID."""
     client = _get_client()
-    return _safe_call(lambda: client.get(f"people/{employee_id}"))
+    body = {"fields": DEFAULT_SEARCH_FIELDS, "humanReadable": "REPLACE"}
+    return _safe_call(lambda: client.post(f"people/{employee_id}", body))
 
 
 @mcp.tool()

@@ -11,7 +11,7 @@
     "type": "python",
     "entry_point": "hibob_mcp_readonly/server.py",
     "mcp_config": {
-      "command": "python",
+      "command": "python3",
       "args": ["-m", "hibob_mcp_readonly.server"],
       "env": {
         "HIBOB_SERVICE_USER_ID": "${user_config.HIBOB_SERVICE_USER_ID}",
