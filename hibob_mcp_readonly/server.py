@@ -188,5 +188,9 @@ def search_goal_cycles(
     return _wrap(lambda: _client().post("goals/goals/goal-cycles/search", filters))
 
 
-if __name__ == "__main__":
+def main():
     mcp.run()
+
+
+if __name__ == "__main__":
+    main()
