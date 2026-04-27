@@ -1,9 +1,5 @@
 import os
-import json
 import functools
-from typing import List, Literal, Optional
-
-from pydantic import BaseModel, Field
 from fastmcp import FastMCP
 from .api_client import HiBobClient, HiBobAPIError
 from .field_filter import filter_response
@@ -19,177 +15,240 @@ Rules:
 - When discussing employees, use their display name and work email only.
 - Do not speculate about data you cannot access (salaries, personal details, performance reviews)."""
 
-mcp = FastMCP("HiBob-ReadOnly")
-
-_ALLOWED_API_FIELDS = {"root.id", "root.email"}
-
-
-class EmployeeFilter(BaseModel):
-    fieldPath: str = Field(description='Field to filter on (e.g. "work.department")')
-    operator: Literal["equals", "contains"] = Field(description="Filter operator")
-    values: List[str] = Field(description="Values to match")
+mcp = FastMCP(
+    name="HiBob-ReadOnly",
+    instructions=SERVER_INSTRUCTIONS,
+)
 
 
-@functools.lru_cache(maxsize=1)
-def _client() -> HiBobClient:
+def _get_client() -> HiBobClient:
+    """Create HiBob client from environment variables."""
     return HiBobClient(
-        os.environ.get("HIBOB_SERVICE_USER_ID", ""),
-        os.environ.get("HIBOB_API_TOKEN", ""),
+        service_user_id=os.environ.get("HIBOB_SERVICE_USER_ID", ""),
+        api_token=os.environ.get("HIBOB_API_TOKEN", ""),
     )
 
 
-def _safe(data) -> str:
-    if not data:
-        data = {"error": ERROR_MESSAGES["empty"]}
-    elif isinstance(data, dict) and "error" not in data:
-        data = filter_response(data)
-    return json.dumps(data, indent=2, ensure_ascii=False)
-
-
-def _wrap(fn) -> str:
+def _safe_call(fn):
+    """Wrapper that catches API errors and returns friendly messages."""
     try:
-        return _safe(fn())
+        result = fn()
+        if not result:
+            return {"error": ERROR_MESSAGES["empty"]}
+        return result
     except HiBobAPIError as e:
-        return json.dumps({"error": str(e)})
+        return {"error": str(e)}
     except Exception:
-        return json.dumps({"error": ERROR_MESSAGES[500]})
+        return {"error": ERROR_MESSAGES[500]}
 
 
-def _validate_filters(filters: list):
-    allowed = set(ALLOWED_FIELD_PREFIXES)
-    api_f, client_f = [], []
-    for f in filters:
-        fp = f.get("fieldPath", "")
-        if fp and not (fp in allowed or any(fp.startswith(p) for p in allowed)):
-            continue
-        (api_f if fp in _ALLOWED_API_FIELDS else client_f).append(f)
-    return api_f, client_f
+def _validate_filters(filters: list) -> list:
+    """Remove filter conditions that reference fields outside the whitelist."""
+    if not filters:
+        return filters
+    return [
+        f for f in filters
+        if "fieldPath" not in f
+        or any(f["fieldPath"].startswith(prefix) for prefix in ALLOWED_FIELD_PREFIXES)
+    ]
+
+
+# ── Middleware: auto-filter ALL tool responses ──
+# Every tool response passes through filter_response automatically.
+# This ensures new tools cannot bypass the filter.
+
+_original_tool_decorator = mcp.tool
+
+
+def _filtered_tool(*args, **kwargs):
+    """Wrap mcp.tool() so every tool's return value is filtered."""
+    decorator = _original_tool_decorator(*args, **kwargs)
+    def wrapper(fn):
+        @functools.wraps(fn)
+        def filtered_fn(*a, **kw):
+            result = fn(*a, **kw)
+            if isinstance(result, dict) and "error" not in result:
+                return filter_response(result)
+            return result
+        # Register the filtered wrapper with FastMCP
+        decorator(filtered_fn)
+        # Return filtered_fn so that direct calls (e.g. from tests) also go through the filter
+        return filtered_fn
+    return wrapper
+
+
+mcp.tool = _filtered_tool
+
+
+# ── Employee Tools ──
+
+@mcp.tool()
+def search_employees(filters: list = None, fields: list = None) -> dict:
+    """
+    Search for employees in HiBob.
+
+    Parameters:
+        filters: Optional list of filters (e.g. [{"fieldPath": "work.department", "operator": "equals", "values": ["Engineering"]}])
+        fields: Ignored — always uses the safe default field list.
+    """
+    client = _get_client()
+    # HiBob API only supports filters on root.id and root.email.
+    # All other filters (e.g. work.department) are applied client-side.
+    api_filters = []
+    client_filters = []
+    if filters:
+        validated = _validate_filters(filters)
+        for f in validated:
+            fp = f.get("fieldPath", "")
+            if fp in ("root.id", "root.email"):
+                api_filters.append(f)
+            else:
+                client_filters.append(f)
+
+    body = {"fields": DEFAULT_SEARCH_FIELDS, "humanReadable": "REPLACE"}
+    if api_filters:
+        body["filters"] = api_filters
+
+    result = _safe_call(lambda: client.post("people/search", body))
+    if isinstance(result, dict) and "error" not in result and client_filters:
+        result["employees"] = _apply_client_filters(result.get("employees", []), client_filters)
+    return result
 
 
 def _apply_client_filters(employees: list, filters: list) -> list:
-    def get_nested(obj, keys):
-        cur = obj
-        for k in keys:
-            cur = cur.get(k) if isinstance(cur, dict) else None
-        return cur
-
+    """Apply filters client-side for fields HiBob API doesn't support filtering on."""
+    filtered = employees
     for f in filters:
-        parts = (f.get("fieldPath") or "").split(".")
+        field_path = f.get("fieldPath", "")
         operator = f.get("operator", "equals")
         values = [v.lower() for v in f.get("values", [])]
+        parts = field_path.split(".")
+
+        def get_nested(obj, keys):
+            for k in keys:
+                if isinstance(obj, dict):
+                    obj = obj.get(k)
+                else:
+                    return None
+            return obj
+
         if operator == "equals":
-            employees = [e for e in employees if str(get_nested(e, parts) or "").lower() in values]
+            filtered = [e for e in filtered if str(get_nested(e, parts) or "").lower() in values]
         elif operator == "contains":
-            employees = [e for e in employees if any(v in str(get_nested(e, parts) or "").lower() for v in values)]
-    return employees
+            filtered = [e for e in filtered if any(v in str(get_nested(e, parts) or "").lower() for v in values)]
+
+    return filtered
 
 
 @mcp.tool()
-def search_employees(filters: Optional[List[EmployeeFilter]] = None) -> str:
-    """Search for employees in HiBob. Supports optional filters on fields like work.department, work.title, root.email, etc."""
-    c = _client()
-    raw = [f.model_dump() for f in (filters or [])]
-    api_f, client_f = _validate_filters(raw)
-    body: dict = {"fields": DEFAULT_SEARCH_FIELDS, "humanReadable": "REPLACE"}
-    if api_f:
-        body["filters"] = api_f
-
-    def call():
-        result = c.post("people/search", body)
-        if client_f and isinstance(result.get("employees"), list):
-            result["employees"] = _apply_client_filters(result["employees"], client_f)
-        return result
-
-    return _wrap(call)
-
-
-@mcp.tool()
-def get_employee(employee_id: str) -> str:
+def get_employee(employee_id: str) -> dict:
     """Get details for a specific employee by their HiBob ID."""
-    c = _client()
+    client = _get_client()
     body = {"fields": DEFAULT_SEARCH_FIELDS, "humanReadable": "REPLACE"}
-    return _wrap(lambda: c.post(f"people/{employee_id}", body))
+    return _safe_call(lambda: client.post(f"people/{employee_id}", body))
 
 
 @mcp.tool()
-def get_employee_fields() -> str:
-    """Get metadata about all employee fields available in HiBob."""
-    return _wrap(lambda: _client().get("company/people/fields"))
+def get_employee_fields() -> dict:
+    """Get metadata about all employee fields in HiBob."""
+    client = _get_client()
+    return _safe_call(lambda: client.get("company/people/fields"))
 
+
+# ── Time Off Tools ──
 
 @mcp.tool()
-def get_whos_out_today() -> str:
+def get_whos_out_today() -> dict:
     """Get a list of employees who are out of office today."""
-    return _wrap(lambda: _client().get("timeoff/outtoday"))
+    client = _get_client()
+    return _safe_call(lambda: client.get("timeoff/outtoday"))
 
 
 @mcp.tool()
-def get_whos_out(from_date: str, to_date: str) -> str:
-    """Get employees who are out of office in a specific date range."""
-    return _wrap(lambda: _client().get(f"timeoff/whosout?from={from_date}&to={to_date}"))
+def get_whos_out(from_date: str, to_date: str) -> dict:
+    """
+    Get employees who are out in a date range.
+
+    Parameters:
+        from_date: Start date (YYYY-MM-DD)
+        to_date: End date (YYYY-MM-DD)
+    """
+    client = _get_client()
+    return _safe_call(lambda: client.get(f"timeoff/whosout?from={from_date}&to={to_date}"))
 
 
 @mcp.tool()
-def list_timeoff_requests(employee_id: str) -> str:
-    """List all time-off requests for a specific employee."""
-    return _wrap(lambda: _client().get(f"timeoff/employees/{employee_id}/requests"))
+def list_timeoff_requests(employee_id: str) -> dict:
+    """List time-off requests for a specific employee."""
+    client = _get_client()
+    return _safe_call(lambda: client.get(f"timeoff/employees/{employee_id}/requests"))
 
 
 @mcp.tool()
-def get_timeoff_balance(employee_id: str) -> str:
-    """Get the remaining time-off balance for a specific employee."""
-    return _wrap(lambda: _client().get(f"timeoff/employees/{employee_id}/balance"))
+def get_timeoff_balance(employee_id: str) -> dict:
+    """Get time-off balance for a specific employee."""
+    client = _get_client()
+    return _safe_call(lambda: client.get(f"timeoff/employees/{employee_id}/balance"))
 
 
 @mcp.tool()
-def get_timeoff_policy_types() -> str:
-    """Get a list of all time-off policy types configured in HiBob."""
-    return _wrap(lambda: _client().get("timeoff/policy-types"))
+def get_timeoff_policy_types() -> dict:
+    """Get a list of all time-off policy types."""
+    client = _get_client()
+    return _safe_call(lambda: client.get("timeoff/policy-types"))
 
+
+# ── Task Tools ──
 
 @mcp.tool()
-def get_employee_tasks(employee_id: str) -> str:
+def get_employee_tasks(employee_id: str) -> dict:
     """Get all tasks assigned to a specific employee."""
-    return _wrap(lambda: _client().get(f"tasks/people/{employee_id}"))
+    client = _get_client()
+    return _safe_call(lambda: client.get(f"tasks/people/{employee_id}"))
+
+
+# ── Reports Tools ──
+
+@mcp.tool()
+def get_report(report_id: str) -> dict:
+    """Run an existing saved report by its ID. Returns report data."""
+    client = _get_client()
+    return _safe_call(lambda: client.get(f"company/reports/{report_id}"))
+
+
+# ── Goals Tools (Talent Module) ──
+
+@mcp.tool()
+def search_goals(filters: dict = None) -> dict:
+    """
+    Search for goals in HiBob.
+
+    Parameters:
+        filters: Optional filter object (e.g. {"status": "active", "typeId": "..."})
+    """
+    client = _get_client()
+    body = filters or {}
+    return _safe_call(lambda: client.post("goals/goals/search", body))
 
 
 @mcp.tool()
-def get_report(report_id: str) -> str:
-    """Run an existing saved report by its ID and return the report data."""
-    return _wrap(lambda: _client().get(f"company/reports/{report_id}"))
+def search_key_results(filters: dict = None) -> dict:
+    """Search for key results linked to goals."""
+    client = _get_client()
+    body = filters or {}
+    return _safe_call(lambda: client.post("goals/goals/key-results/search", body))
 
 
 @mcp.tool()
-def search_goals(
-    status: Optional[str] = Field(None, description='Goal status filter, e.g. "active" or "completed"'),
-    type_id: Optional[str] = Field(None, description="Goal type ID"),
-) -> str:
-    """Search for goals in HiBob. Optionally filter by status ('active', 'completed') or type_id."""
-    filters = {k: v for k, v in {"status": status, "typeId": type_id}.items() if v is not None}
-    return _wrap(lambda: _client().post("goals/goals/search", filters))
-
-
-@mcp.tool()
-def search_key_results(
-    status: Optional[str] = Field(None, description="Key result status filter"),
-    goal_id: Optional[str] = Field(None, description="Filter by parent goal ID"),
-) -> str:
-    """Search for key results linked to goals in HiBob."""
-    filters = {k: v for k, v in {"status": status, "goalId": goal_id}.items() if v is not None}
-    return _wrap(lambda: _client().post("goals/goals/key-results/search", filters))
-
-
-@mcp.tool()
-def search_goal_cycles(
-    status: Optional[str] = Field(None, description="Cycle status filter"),
-) -> str:
-    """Search for goal cycles (time periods used for goal tracking) in HiBob."""
-    filters = {k: v for k, v in {"status": status}.items() if v is not None}
-    return _wrap(lambda: _client().post("goals/goals/goal-cycles/search", filters))
+def search_goal_cycles(filters: dict = None) -> dict:
+    """Search for goal cycles (time periods for goal tracking)."""
+    client = _get_client()
+    body = filters or {}
+    return _safe_call(lambda: client.post("goals/goals/goal-cycles/search", body))
 
 
 def main():
-    mcp.run()
+    mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":
