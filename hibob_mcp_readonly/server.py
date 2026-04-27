@@ -21,8 +21,8 @@ mcp = FastMCP(
 )
 
 
+@functools.lru_cache(maxsize=1)
 def _get_client() -> HiBobClient:
-    """Create HiBob client from environment variables."""
     return HiBobClient(
         service_user_id=os.environ.get("HIBOB_SERVICE_USER_ID", ""),
         api_token=os.environ.get("HIBOB_API_TOKEN", ""),
@@ -30,11 +30,12 @@ def _get_client() -> HiBobClient:
 
 
 def _safe_call(fn):
-    """Wrapper that catches API errors and returns friendly messages."""
     try:
         result = fn()
         if not result:
             return {"error": ERROR_MESSAGES["empty"]}
+        if isinstance(result, dict) and "error" not in result:
+            return filter_response(result)
         return result
     except HiBobAPIError as e:
         return {"error": str(e)}
@@ -43,7 +44,6 @@ def _safe_call(fn):
 
 
 def _validate_filters(filters: list) -> list:
-    """Remove filter conditions that reference fields outside the whitelist."""
     if not filters:
         return filters
     return [
@@ -53,34 +53,28 @@ def _validate_filters(filters: list) -> list:
     ]
 
 
-# ── Middleware: auto-filter ALL tool responses ──
-# Every tool response passes through filter_response automatically.
-# This ensures new tools cannot bypass the filter.
+def _apply_client_filters(employees: list, filters: list) -> list:
+    filtered = employees
+    for f in filters:
+        field_path = f.get("fieldPath", "")
+        operator = f.get("operator", "equals")
+        values = [v.lower() for v in f.get("values", [])]
+        parts = field_path.split(".")
 
-_original_tool_decorator = mcp.tool
+        def get_nested(obj, keys):
+            for k in keys:
+                if isinstance(obj, dict):
+                    obj = obj.get(k)
+                else:
+                    return None
+            return obj
 
+        if operator == "equals":
+            filtered = [e for e in filtered if str(get_nested(e, parts) or "").lower() in values]
+        elif operator == "contains":
+            filtered = [e for e in filtered if any(v in str(get_nested(e, parts) or "").lower() for v in values)]
+    return filtered
 
-def _filtered_tool(*args, **kwargs):
-    """Wrap mcp.tool() so every tool's return value is filtered."""
-    decorator = _original_tool_decorator(*args, **kwargs)
-    def wrapper(fn):
-        @functools.wraps(fn)
-        def filtered_fn(*a, **kw):
-            result = fn(*a, **kw)
-            if isinstance(result, dict) and "error" not in result:
-                return filter_response(result)
-            return result
-        # Register the filtered wrapper with FastMCP
-        decorator(filtered_fn)
-        # Return filtered_fn so that direct calls (e.g. from tests) also go through the filter
-        return filtered_fn
-    return wrapper
-
-
-mcp.tool = _filtered_tool
-
-
-# ── Employee Tools ──
 
 @mcp.tool()
 def search_employees(filters: list = None, fields: list = None) -> dict:
@@ -92,8 +86,6 @@ def search_employees(filters: list = None, fields: list = None) -> dict:
         fields: Ignored — always uses the safe default field list.
     """
     client = _get_client()
-    # HiBob API only supports filters on root.id and root.email.
-    # All other filters (e.g. work.department) are applied client-side.
     api_filters = []
     client_filters = []
     if filters:
@@ -115,31 +107,6 @@ def search_employees(filters: list = None, fields: list = None) -> dict:
     return result
 
 
-def _apply_client_filters(employees: list, filters: list) -> list:
-    """Apply filters client-side for fields HiBob API doesn't support filtering on."""
-    filtered = employees
-    for f in filters:
-        field_path = f.get("fieldPath", "")
-        operator = f.get("operator", "equals")
-        values = [v.lower() for v in f.get("values", [])]
-        parts = field_path.split(".")
-
-        def get_nested(obj, keys):
-            for k in keys:
-                if isinstance(obj, dict):
-                    obj = obj.get(k)
-                else:
-                    return None
-            return obj
-
-        if operator == "equals":
-            filtered = [e for e in filtered if str(get_nested(e, parts) or "").lower() in values]
-        elif operator == "contains":
-            filtered = [e for e in filtered if any(v in str(get_nested(e, parts) or "").lower() for v in values)]
-
-    return filtered
-
-
 @mcp.tool()
 def get_employee(employee_id: str) -> dict:
     """Get details for a specific employee by their HiBob ID."""
@@ -151,17 +118,13 @@ def get_employee(employee_id: str) -> dict:
 @mcp.tool()
 def get_employee_fields() -> dict:
     """Get metadata about all employee fields in HiBob."""
-    client = _get_client()
-    return _safe_call(lambda: client.get("company/people/fields"))
+    return _safe_call(lambda: _get_client().get("company/people/fields"))
 
-
-# ── Time Off Tools ──
 
 @mcp.tool()
 def get_whos_out_today() -> dict:
     """Get a list of employees who are out of office today."""
-    client = _get_client()
-    return _safe_call(lambda: client.get("timeoff/outtoday"))
+    return _safe_call(lambda: _get_client().get("timeoff/outtoday"))
 
 
 @mcp.tool()
@@ -173,50 +136,38 @@ def get_whos_out(from_date: str, to_date: str) -> dict:
         from_date: Start date (YYYY-MM-DD)
         to_date: End date (YYYY-MM-DD)
     """
-    client = _get_client()
-    return _safe_call(lambda: client.get(f"timeoff/whosout?from={from_date}&to={to_date}"))
+    return _safe_call(lambda: _get_client().get(f"timeoff/whosout?from={from_date}&to={to_date}"))
 
 
 @mcp.tool()
 def list_timeoff_requests(employee_id: str) -> dict:
     """List time-off requests for a specific employee."""
-    client = _get_client()
-    return _safe_call(lambda: client.get(f"timeoff/employees/{employee_id}/requests"))
+    return _safe_call(lambda: _get_client().get(f"timeoff/employees/{employee_id}/requests"))
 
 
 @mcp.tool()
 def get_timeoff_balance(employee_id: str) -> dict:
     """Get time-off balance for a specific employee."""
-    client = _get_client()
-    return _safe_call(lambda: client.get(f"timeoff/employees/{employee_id}/balance"))
+    return _safe_call(lambda: _get_client().get(f"timeoff/employees/{employee_id}/balance"))
 
 
 @mcp.tool()
 def get_timeoff_policy_types() -> dict:
     """Get a list of all time-off policy types."""
-    client = _get_client()
-    return _safe_call(lambda: client.get("timeoff/policy-types"))
+    return _safe_call(lambda: _get_client().get("timeoff/policy-types"))
 
-
-# ── Task Tools ──
 
 @mcp.tool()
 def get_employee_tasks(employee_id: str) -> dict:
     """Get all tasks assigned to a specific employee."""
-    client = _get_client()
-    return _safe_call(lambda: client.get(f"tasks/people/{employee_id}"))
+    return _safe_call(lambda: _get_client().get(f"tasks/people/{employee_id}"))
 
-
-# ── Reports Tools ──
 
 @mcp.tool()
 def get_report(report_id: str) -> dict:
     """Run an existing saved report by its ID. Returns report data."""
-    client = _get_client()
-    return _safe_call(lambda: client.get(f"company/reports/{report_id}"))
+    return _safe_call(lambda: _get_client().get(f"company/reports/{report_id}"))
 
-
-# ── Goals Tools (Talent Module) ──
 
 @mcp.tool()
 def search_goals(filters: dict = None) -> dict:
@@ -226,29 +177,23 @@ def search_goals(filters: dict = None) -> dict:
     Parameters:
         filters: Optional filter object (e.g. {"status": "active", "typeId": "..."})
     """
-    client = _get_client()
-    body = filters or {}
-    return _safe_call(lambda: client.post("goals/goals/search", body))
+    return _safe_call(lambda: _get_client().post("goals/goals/search", filters or {}))
 
 
 @mcp.tool()
 def search_key_results(filters: dict = None) -> dict:
     """Search for key results linked to goals."""
-    client = _get_client()
-    body = filters or {}
-    return _safe_call(lambda: client.post("goals/goals/key-results/search", body))
+    return _safe_call(lambda: _get_client().post("goals/goals/key-results/search", filters or {}))
 
 
 @mcp.tool()
 def search_goal_cycles(filters: dict = None) -> dict:
     """Search for goal cycles (time periods for goal tracking)."""
-    client = _get_client()
-    body = filters or {}
-    return _safe_call(lambda: client.post("goals/goals/goal-cycles/search", body))
+    return _safe_call(lambda: _get_client().post("goals/goals/goal-cycles/search", filters or {}))
 
 
 def main():
-    mcp.run(transport="stdio")
+    mcp.run()
 
 
 if __name__ == "__main__":
